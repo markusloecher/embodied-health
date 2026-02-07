@@ -1,0 +1,56 @@
+---
+title: "Yeager - Study 5"
+author: "ML"
+date: "2026-02-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(stargazer)
+```
+
+# STUDY 5
+
+```{r}
+### stressmindset_manipcheck_sd
+load("./data/study5wide.rdta")
+
+study5wide$stressmindset_manipcheck_sd <- scale(study5wide$stressmindset_manipcheck)
+
+#summary(lm(stressmindset_manipcheck_sd~cond, data=study5wide))
+
+model5.1 <- lm(stressmindset_manipcheck_sd ~ cond +
+                 grade + cort_base + fixedmindset_baseline + selfesteem_baseline +
+                 pss_baseline + testanxiety_baseline + stressmindset_baseline +
+                 sex + age_3, data = study5wide
+               )
+#summary(model5.1)
+
+model5.1_interaction <- lm(stressmindset_manipcheck_sd ~ cond +
+                             cond * cort_base +
+                             cond * fixedmindset_baseline +
+                             cond * stressmindset_baseline +
+                             cond * selfesteem_baseline +
+                             cond * pss_baseline +
+                             cond * testanxiety_baseline +
+                 grade + cort_base + fixedmindset_baseline + selfesteem_baseline +
+                 pss_baseline + testanxiety_baseline + stressmindset_baseline +
+                 sex + age_3, data = study5wide
+)
+summary(model5.1_interaction)
+```
+
+## Table 4
+
+```{r, results = "asis"}
+stargazer(model5.1_interaction,
+          # type = "latex",
+          type = "html",
+          title = "Synergistic Mindset Paper - Dataset 5 - Post Stressmindset Regression")
+
+#model_comparison <- anova(model5.1, model5.1_interaction)
+#print(model_comparison)
+
+```
+

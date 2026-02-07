@@ -1,0 +1,55 @@
+---
+title: "Open Label Placebo"
+author: "ML"
+date: "2026-02-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(stargazer)
+```
+
+Reproducing the results from 
+
+Leibowitz, K. A., Hardebeck, E. J., Goyer, J. P., & Crum, A. J. (2019). **The role of patient beliefs in open-label placebo effects.** Health Psychology, 38(7), 613.
+
+```{r read data}
+wheal_data <- haven::read_sav("./data/Open_label_longform_Sept_2017.sav")
+wheal_data$treatment = factor(wheal_data$condition, levels = c(5,1,3,4), labels = c("Control", "Ritual", "Expectation", "Rationale"))
+```
+
+```{r}
+# Rationale  ----------------------------------------------------------------
+wheal_rationale <- wheal_data %>%
+  filter((condition == 5) | (condition == 4)) %>%
+  mutate(rationale = ifelse(condition == 4, 1, 0)) %>%
+  # high low placebo belief
+  mutate(
+    placebo_belief_sd = (placebo_power - mean(placebo_power, na.rm = TRUE)) / sd(placebo_power, na.rm = TRUE),
+    high_placebo_belief = ifelse(placebo_belief_sd > 1, 1, 0),  # 1 for +1 SD, 0 otherwise
+    low_placebo_belief = ifelse(placebo_belief_sd < -1, 1, 0)
+  ) %>%
+  filter(!(is.na(placebo_power)))
+
+model_rationale_low <- lm(T9_wheal_avg ~ rationale + # Treatment
+                     low_placebo_belief +
+                       rationale * low_placebo_belief + # switch low- and high- placebo belief
+                     # Controls
+                     T3_wheal_avg +
+                       low_placebo_belief * T3_wheal_avg,
+                     data = wheal_rationale)
+summary(model_rationale_low)
+
+```
+
+## Table 5
+
+```{r, results = "asis"}
+stargazer(model_rationale_low,
+          # type = "latex",
+          type = "html",
+          title = "Open Label Placebo")
+```
+

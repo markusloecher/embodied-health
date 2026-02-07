@@ -1,0 +1,271 @@
+---
+title: "Estimation of HTEs with causal forests"
+author: "ML"
+date: "2025-03-06"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, message = F, warning = F)
+library(grf)
+library(hstats)
+library(ggplot2)
+library(patchwork)    #  Combine ggplots
+library(kableExtra)
+options(knitr.table.format = "html") 
+rerun = FALSE
+```
+
+## Data
+
+We have 2425 observations of 367 (!) variables.
+
+```{r}
+X = rio::import("data/workingJan29.dta")
+knitr::kable(head(X[-(1:5), 1:10]))
+#s = rio::import("subjectiverecovery.dta")
+cat("number of subjects:", length(unique(X$subject)), "\n")
+```
+
+```{r}
+covariates2incl = c("healing", "condition", "subjectiverecovery", "session", "responseid", "abs_avg_all", "changed_avg_all",colnames(X)[7:16])
+#covariates2incl = c("healing", "condition","subjectiverecovery", "abs_avg_all", "changed_avg_all",colnames(X)[7:16])
+X$subjectiverecovery = as.numeric(X$subjectiverecovery)
+X$subjectiverecovery[is.na(X$subjectiverecovery)] = 0
+NAsubjects = which(X$subject=="NA" | X$subject=="")
+X$subject[NAsubjects] = "0"
+
+NArows = which(rowSums(is.na(X[,c(covariates2incl, "subject")]))>0)
+X = X[-NArows,]
+
+cat("dimension of X:")
+print(dim(X[,c(covariates2incl, "subject")]))
+cat("number of subjects:", length(unique(X$subject)), "\n")
+
+X_enc = model.matrix( ~ . -1, data = X[, covariates2incl])
+#allDat = cbind.data.frame(Y = X$healing, W = X$condition, X_enc)
+X_enc = as.data.frame(X_enc)
+
+X_enc$condition = factor(X_enc$condition, levels = c("28", "14", "56"))
+```
+
+
+## Marginal Treatment Effects:
+
+```{r}
+p <- ggplot(X, aes(x=factor(condition), y=healing))
+#p + geom_boxplot()
+p + geom_violin() +geom_boxplot(width=.1)
+```
+```{r}
+options(digits=3)
+#knitr::kable(
+  aggregate(healing ~ condition, data = X, FUN = mean) %>%  kbl(caption = "Marginal Means") %>%
+  kable_classic(full_width = F, html_font = "Cambria") %>% row_spec(0,bold=TRUE)
+```
+
+
+The `multi_arm_causal_forest()` function in `grf` seems like a suitable tool for directly estimating heterogeneous treatment effects when there are more than two treatment arms. It can potentially offer a more integrated and nuanced understanding compared to the "one-vs-rest" approach, although the interpretation might require a bit more attention.
+
+By default, `multi_arm_causal_forest()` will treat the first level of your factor variable as the baseline or control group. 
+
+
+Our outcome variable (`Y`) is `healing`, the multi-level treatment variable (`W`) is `condition`, and for now we include the following covariates (`X`):
+
+**`r covariates2incl[-(1:2)]`**
+
+
+```{r runGRF, eval = rerun}
+library(grf)
+
+multi_arm_cf <- multi_arm_causal_forest(
+  Y = X_enc[,"healing"],
+  W = X_enc[,"condition"],
+  X = X_enc[,-c(1,2)], # Select your covariates
+  min.node.size = 25,
+  clusters = as.numeric(factor(X$subject)),
+  num.trees = 2000 # Recommended number of trees
+)
+
+#save(multi_arm_cf, X_enc, file = "models/multi_arm_cf.rda")
+#save(multi_arm_cf, X_enc, file = "models/cf_15_2000.rda")
+```
+
+```{r, echo = F, eval = !rerun}
+#load("models/multi_arm_cf.rda")
+load("models/cf_20_2000.rda")
+```
+
+We fit a causal forest with `2000` trees, resulting in estimated average treatment effects:
+
+```{r}
+#knitr::kable(average_treatment_effect(multi_arm_cf))
+average_treatment_effect(multi_arm_cf) %>%  kbl(caption = "") %>%
+  kable_classic(full_width = F, html_font = "Cambria") %>% kable_styling(bootstrap_options = c("striped", "hover")) %>% row_spec(0,bold=TRUE)
+```
+
+
+**Predict Heterogeneous Treatment Effects (ATEs relative to the baseline):**
+
+The `predict()` method for a `multi_arm_causal_forest` object will give us the estimated average treatment effect for each treatment arm *relative to the baseline arm*, conditional on your covariates.
+
+```{r, fig.width = 8, fig.height = 4}
+multi_arm_cate <- predict(multi_arm_cf)
+#head(multi_arm_cate$predictions)
+
+CATEs = multi_arm_cate$predictions[,,1]
+par(mfrow=c(1,2))
+for (j in 1:2) {
+  m = mean(CATEs[,j])
+  #print(round(m,3))
+  hist(CATEs[,j], main = "HTEs", xlab = colnames(CATEs)[j]);grid()
+  abline (v=m, col = 2, lty=2)
+}
+```
+
+
+**Analyze and Interpret the Results:**
+
+The interpretation now focuses on the effects relative to the chosen baseline.
+
+* **Magnitude and Heterogeneity:** Examine the distributions of the estimated CATEs for each comparison ("Medium - Low", "High - Low"). This will show you how the effect of "Medium" (compared to "Low") and "High" (compared to "Low") varies across your data.
+* **Relationship with Covariates:** Use `partial_dependence()` to visualize how these relative treatment effects change with your covariates. For example:
+
+## FEATURE IMPORTANCE
+
+Note that the default version of this metric is rather rudimentary: 
+> A simple weighted sum of how many times feature i was split on at each depth in the forest.
+
+Looking ahead we might want to switch to other attribution schemes such as permutation importance or SHAP values.
+
+```{r}
+xvars = colnames(X_enc)[-(1:2)]
+imp <- sort(setNames(variable_importance(multi_arm_cf), xvars), decreasing = TRUE)
+par(mai = c(0.7, 2, 0.2, 0.2))
+barplot(imp[10:1], horiz = TRUE, las = 1, col = "orange")
+```
+
+
+## Partial Dependence Plots (PDPs)
+
+To study the **main effects** on the CATE, we consider partial dependence plots (PDP). Such plot shows how the average prediction depends on the values of a feature, keeping all other feature values constant (can be unnatural.)
+
+```{r}
+pred_fun1 <- function(object, newdata, treat=1,...) {
+  predict(object, newdata, ...)$predictions[,treat,1]
+}
+pred_fun2 <- function(object, newdata, treat=2,...) {
+  predict(object, newdata, ...)$predictions[,treat,1]
+}
+```
+
+## Figures 4 and 5
+
+```{r PDPs, eval = rerun}
+pdp1 = pdp2 = list()
+
+#for (v in c(names(imp)[1:6], "subjectiverecovery")[6]){
+for (v in names(imp)[1:6]){
+  pdp1[[v]] = partial_dep(multi_arm_cf, v = v, X = X_enc[,-c(1,2)], pred_fun = pred_fun1) 
+
+  pdp2[[v]] = partial_dep(multi_arm_cf, v = v, X = X_enc[,-c(1,2)], pred_fun = pred_fun2) 
+}
+
+#save(pdp1, pdp2, file = "models/pdps.rda")
+```
+
+```{r PDP_plots, fig.width = 10}
+#load("models/pdps.rda")
+#load("models/subjectiveRecoveryNA=0/pdps.rda")
+p1 = p2 = list()
+for (v in names(imp)[1:6]){
+  p1[[v]] = plot(pdp1[[v]]) +ggtitle("PDP, 28-14") + geom_rug(sides="b")
+  p2[[v]] = plot(pdp2[[v]]) +ggtitle("PDP, 56-14") + geom_rug(sides="b")
+}
+wrap_plots(p1, guides = "collect", ncol = 3)
+wrap_plots(p2, guides = "collect", ncol = 3)
+```
+
+
+## Interactions
+
+A model agnostic way to assess pairwise interaction strength is Friedman’s H statistic [1]. It measures the error when approximating the two-dimensional partial dependence function of the two features by their univariate partial dependence functions. A value of zero means there is no interaction. A value of α means that about 100α%% of the joint effect (variability) comes from the interaction.
+
+```{r H_stats, eval = rerun}
+H1 <- hstats(multi_arm_cf, X = X_enc[,-c(1,2)], pred_fun = pred_fun1, verbose = FALSE)
+H2 <- hstats(multi_arm_cf, X = X_enc[,-c(1,2)], pred_fun = pred_fun2, verbose = FALSE)
+save(H1, H2, file = "models/H_stats.rda")
+
+```
+
+
+#### 28-14
+
+```{r}
+load("models/H_stats.rda")
+plot(H1)
+```
+
+#### 56-14
+
+```{r}
+plot(H2)
+```
+
+## Questions
+
+> When you look at the factor of mindfulness, if you look at the highly mindful participants — did they respond to the perceived time manipulation if they attended to positive variance in the 56m?
+
+We attempt to answer this by visualizing interactions, e.g., by a stratified PDP.
+
+```{r}
+p_high_mindful_28 = partial_dep(multi_arm_cf, v = "abs_avg_all", X = subset(X_enc[,-c(1,2)], mindfulness >=80), pred_fun = pred_fun1) 
+p_high_mindful_56 = partial_dep(multi_arm_cf, v = "abs_avg_all", X = subset(X_enc[,-c(1,2)], mindfulness >=80), pred_fun = pred_fun2) 
+```
+
+```{r}
+p_high_mindful = list()
+p_high_mindful[[1]] = plot(p_high_mindful_28) +ggtitle("PDP, 28-14, mindful >=80") + geom_rug(sides="b")
+p_high_mindful[[2]] = plot(p_high_mindful_56) +ggtitle("PDP, 56-14, mindful >=80") + geom_rug(sides="b")
+
+wrap_plots(p_high_mindful, guides = "collect", ncol = 2)
+```
+
+
+-------------------
+
+## SHAP values
+
+Yet to come
+
+
+
+### Additional Comments
+
+* **Inference (Confidence Intervals):** You can also obtain standard errors and confidence intervals for the CATE predictions using the `predict()` function with the `estimate.variance = TRUE` option:
+
+```{r, eval = F}
+multi_arm_cate_with_var <- predict(multi_arm_cf, estimate.variance = TRUE)
+head(multi_arm_cate_with_var$predictions)
+head(multi_arm_cate_with_var$variance.estimates)
+```
+
+    You can then construct confidence intervals based on these variance estimates.
+
+```{r}
+multi_arm_cate_with_var$z_score = multi_arm_cate_with_var$predictions[,,1]
+
+for (j in 1:2) multi_arm_cate_with_var$z_score[,j] = multi_arm_cate_with_var$predictions[,j,1]/sqrt(multi_arm_cate_with_var$variance.estimates[,j])
+```
+
+```{r}
+z_scores = tidyr::pivot_longer(as.data.frame(multi_arm_cate_with_var$z_score), cols = 1:2)
+colnames(z_scores) = c("effect","z_score")
+p <- ggplot(z_scores, aes(x=z_score, fill= effect)) + 
+  geom_histogram()
+p
+```
+
+-----
+
+[1] Friedman, Jerome H., and Bogdan E. Popescu. Predictive Learning via Rule Ensembles. The Annals of Applied Statistics 2, no. 3 (2008): 916-54.
